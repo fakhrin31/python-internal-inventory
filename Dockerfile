@@ -1,20 +1,15 @@
-# Use an official Python runtime as a parent image
+# Gunakan image Python yang ringan
 FROM python:3.10-slim
 
-# Set the working directory in the container
+# Atur direktori kerja di dalam container
 WORKDIR /app
 
-# Copy the current directory contents into the container at /app
-COPY requirements.txt ./
-
-# Install any needed packages specified in requirements.txt
+# Salin file requirements.txt dan install dependencies
+COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app/ .
-COPY app/main.py main.py
+# Salin semua file dari folder app ke dalam container
+COPY app/ /app
 
-# Define environment variable
-ENV NAME World
-
-# Run app.py when the container launches
-CMD ["python", "main.py"]
+# Jalankan aplikasi menggunakan uvicorn
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
