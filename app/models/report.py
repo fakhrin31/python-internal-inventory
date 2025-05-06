@@ -3,7 +3,7 @@ from pydantic import BaseModel, Field
 from typing import List, Optional
 from datetime import datetime
 # Import Enum jika perlu untuk skema report, misal ReturnCondition
-from app.models.enum import ReturnCondition
+from app.const.enum import ReturnCondition
 
 # --- Skema Lama (jika ada) ---
 class StockMovementItemSummary(BaseModel):

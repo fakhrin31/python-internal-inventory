@@ -3,7 +3,7 @@ from typing import Optional, List
 from beanie import Document, Link
 from pydantic import BaseModel, Field, EmailStr, field_validator
 from pymongo import IndexModel, ASCENDING, DESCENDING # Import DESCENDING
-from enum import Enum
+from app.const.enum import Enum
 from bson import ObjectId
 from datetime import datetime
 

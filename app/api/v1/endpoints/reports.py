@@ -12,7 +12,7 @@ from app.core.security import require_staff_or_admin, User
 from app.models.borrowing import Borrowing, BorrowingStatus # Import model utama & status enum
 from app.models.borrowing import Borrowing # Re-import untuk akses skema nested jika perlu
 from app.models.item import Item # Untuk lookup di agregasi
-from app.models.enum import ReturnCondition # Untuk laporan kondisi
+from app.const.enum import ReturnCondition # Untuk laporan kondisi
 from app.models.report import ( # Import skema laporan
     TopBorrowedItem, TopBorrowedItemsReport,
     ReturnConditionSummary, ReturnConditionReport

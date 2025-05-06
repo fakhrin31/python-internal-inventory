@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional, List # Import List
 import logging # Use logging
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, status, Request
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
 from passlib.context import CryptContext
@@ -11,7 +11,7 @@ from beanie.odm.operators.find.comparison import Eq # Import Eq for queries
 
 # Import config variables directly
 from app.core.config import SECRET_KEY, ALGORITHM, ACCESS_TOKEN_EXPIRE_MINUTES
-from app.models.token import TokenData
+from app.dto.token import TokenData
 # Import User model and UserRole Enum
 from app.models.user import User, UserRole
 
@@ -46,43 +46,67 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
 
 
 # --- Get Current User Function (get_current_user) ---
-async def get_current_user(token: str = Depends(oauth2_scheme)) -> User:
+async def get_current_user(
+    request: Request, # Tambahkan request untuk akses state
+    token: str = Depends(oauth2_scheme) # Token tetap didapat dari header
+) -> User: # Return objek Beanie User Model
+    """
+    Gets the current user from the request state (set by AuthMiddleware)
+    or decodes the token if state is not available.
+    Raises credentials exception if user not found or token invalid.
+    """
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
         headers={"WWW-Authenticate": "Bearer"},
     )
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        username: Optional[str] = payload.get("sub")
-        if username is None:
-             logger.warning("Token decoding failed: Username ('sub') missing.")
+
+    username: Optional[str] = getattr(request.state, "username", None)
+
+    if not username: # Jika middleware tidak set username (misal error atau middleware tidak jalan)
+        logger.warning("Username not found in request state, attempting token decode in dependency.")
+        try:
+            payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+            username = payload.get("sub")
+            if username is None:
+                raise credentials_exception
+            # token_data = TokenData(username=username) # Tidak perlu TokenData lagi
+        except JWTError:
+            logger.warning("Token decode failed in get_current_user dependency.")
+            raise credentials_exception
+        except Exception as e:
+             logger.error(f"Unexpected error decoding token in dependency: {e}")
              raise credentials_exception
-        token_data = TokenData(username=username)
-    except JWTError as e:
-        logger.warning(f"Token decoding failed: {e}")
-        raise credentials_exception
-    except Exception as e: # Catch other potential errors during decoding
-        logger.error(f"An unexpected error occurred during token decoding: {e}")
+
+    if not username: # Jika masih tidak ada username setelah semua usaha
+         logger.error("Could not determine username from state or token.")
+         raise credentials_exception
+
+    # Cari user di DB berdasarkan username
+    user = await User.find_one(Eq(User.username, username))
+    if user is None:
+        logger.warning(f"User '{username}' not found in database.")
         raise credentials_exception
 
-    # Use Eq for Beanie query consistency
-    user = await User.find_one(Eq(User.username, token_data.username))
-    if user is None:
-        logger.warning(f"User '{token_data.username}' from token not found in DB.")
-        raise credentials_exception
-    # Disabled check now happens in get_current_active_user for clarity
-    # if user.disabled:
-    #     logger.warning(f"User '{token_data.username}' is disabled.")
-    #     raise HTTPException(status_code=400, detail="Inactive user")
+    # Kembalikan objek Beanie User
     return user
 
-# --- Get Current Active User (checks disabled status) ---
-async def get_current_active_user(current_user: User = Depends(get_current_user)) -> User:
+async def get_current_active_user(
+    current_user: User = Depends(get_current_user) # Terima objek Beanie User
+) -> User:
+    """Checks if the retrieved user is active."""
     if current_user.disabled:
         logger.warning(f"Access denied for disabled user '{current_user.username}'.")
         raise HTTPException(status_code=400, detail="Inactive user")
     return current_user
+
+# --- Fungsi require_role / require_roles tetap sama ---
+# Mereka menerima user dari Depends(get_current_active_user)
+def require_role(required_role: UserRole):
+    async def role_checker(current_user: User = Depends(get_current_active_user)):        # ... (cek current_user.role) ...
+        if current_user.role != required_role: ... # Raise 403
+        return current_user
+    return role_checker
 
 
 # --- NEW: Role Checking Dependency ---

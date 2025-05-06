@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 # PENTING: Impor model dasar SEBELUM definisi skema Ref
 from .item import Item
 from .user import User
-from .enum import BorrowingStatus, ReturnCondition
+from ..const.enum import BorrowingStatus, ReturnCondition
 
 
 # --- DEFINISIKAN SKEMA REFERENSI DULU ---

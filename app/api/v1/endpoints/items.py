@@ -3,10 +3,11 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, status, Path, Body, Query
 from bson import ObjectId
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 import uuid
 from pydantic import ValidationError, BaseModel # <-- Tambahkan BaseModel
 from beanie import Link
+from pymongo import ReadPreference
 
 # Import security dependency
 from app.core.security import require_staff_or_admin, User # (Asumsi get_current_active_user ada jika perlu auth umum)
@@ -167,50 +168,108 @@ async def read_item(
 @router.put(
     "/{item_id}",
     response_model=Item.Response,
-    dependencies=[Depends(require_staff_or_admin)] # <-- Tambahkan dependensi keamanan
+    dependencies=[Depends(require_staff_or_admin)]
 )
 async def update_item(
-    # Parameter Path
     item_id: str = Path(..., description="The ID of the item to update"),
-    # Parameter Body
-    item_in: Item.Update = Body(...),
-    # Tambahkan dependensi untuk mendapatkan current_user jika diperlukan untuk logging/logic
+    item_in: Item.Update = Body(...), # Skema Update TIDAK punya SKU/stock
     current_user: User = Depends(require_staff_or_admin)
 ):
-    """Update item details. Stock level is NOT updated here."""
+    """
+    Update item details (name, desc, category, price, location, is_active).
+    Stock level is NOT updated here. Category updated via ID.
+    """
     item_to_update = await get_item_or_404(item_id)
     update_data = item_in.model_dump(exclude_unset=True)
 
-    if not update_data: raise HTTPException(status_code=400, detail="No update data provided.")
+    if not update_data:
+        raise HTTPException(status_code=400, detail="No update data provided.")
 
-    # --- (Logika cek SKU (jika diizinkan update), cek/update kategori) ---
-    # Contoh: cek & update kategori
+    # --- Penanganan Kategori (seperti sebelumnya, mengandalkan Beanie) ---
     if "category_id" in update_data:
-        new_category_id = update_data.pop("category_id")
-        if new_category_id:
+        new_category_id_str = update_data.pop("category_id")
+        logger.debug(f"Attempting to update category for item {item_id} to category ID {new_category_id_str}")
+        if new_category_id_str:
              try:
-                 new_category_obj = await get_category_or_404(new_category_id)
+                 new_category_obj = await get_category_or_404(new_category_id_str)
+                 # Tetapkan objek Category Beanie, biarkan Beanie handle konversi ke Link/DBRef saat save/update
                  update_data["category"] = new_category_obj
+                 logger.debug(f"Category object for update: {new_category_obj.id}")
              except HTTPException as e:
                  raise HTTPException(status_code=e.status_code, detail=f"Invalid new category_id: {e.detail}")
+        else:
+             # User mengirim null/kosong, abaikan perubahan kategori
+             logger.warning(f"Received null/empty category_id for item update {item_id}. Category not changed.")
+             if "category" in update_data: del update_data["category"] # Hapus key jika ada
     # -----------------------------------------------------------------
 
-    # Set updated_at timestamp
-    update_data["updated_at"] = datetime.now()
+    # --- Set updated_at timestamp ---
+    update_data["updated_at"] = datetime.now(timezone.utc)
+    logger.debug(f"Final update payload for item {item_id}: {update_data}")
 
-    # Lakukan update
+    # --- Lakukan update menggunakan $set ---
     try:
+        # Panggil update pada instance. Jika gagal, akan raise Exception.
+        # TIDAK perlu menangkap hasilnya atau cek modified_count.
         await item_to_update.update({"$set": update_data})
-        logger.info(f"Item '{item_to_update.name}' (ID: {item_id}) updated by user '{current_user.username}'. Changes: {list(update_data.keys())}")
+
+        logger.info(f"Item '{item_to_update.name}' (ID: {item_id}) update command sent by user '{current_user.username}'. Fields attempted: {list(update_data.keys())}")
+
     except Exception as e:
         logger.error(f"Database error updating item '{item_id}': {e}", exc_info=True)
+        # Cek duplicate key error jika SKU diizinkan diupdate di masa depan
+        # if "duplicate key error" ... raise HTTPException(409, ...)
         raise HTTPException(status_code=500, detail="Failed to update item in database.") from e
 
-    # Fetch ulang SETELAH update
-    updated_item = await get_item_or_404(item_id)
+    # --- Fetch ulang + Validasi Response (seperti sebelumnya) ---
+    try:
+        logger.info(f"Fetching updated item state for {item_id} for response...")
+        # Fetch ulang dengan links dari PRIMARY
+        updated_item = await Item.find_one(
+            {"_id": ObjectId(item_id)},
+            fetch_links=True
+        )
+        if not updated_item:
+            raise HTTPException(status_code=404, detail="Item not found after update (possible immediate deletion or error).") # Ubah jadi 404
 
-    # Gunakan helper untuk validasi response
-    return validate_item_response(updated_item)
+        # Gunakan helper validasi item (buat jika belum ada, mirip validate_borrowing_response)
+        # Asumsikan helper validate_item_response sudah ada
+        return validate_item_response(updated_item)
+    except HTTPException as http_exc:
+        raise http_exc
+    except Exception as e:
+        logger.error(f"Error preparing response for updated item {item_id}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Error preparing item data for response.") from e
+
+# --- Helper validate_item_response (Contoh) ---
+# (Harus dibuat mirip validate_borrowing_response, handle ID item & nested category ID)
+def validate_item_response(item_doc: Item) -> Item.Response:
+    if not item_doc: raise ValueError("Invalid item document")
+    item_id_log = str(getattr(item_doc, 'id', 'N/A'))
+    logger.debug(f"[{item_id_log}] Validating item response...")
+    try:
+        item_data = item_doc.model_dump(mode='json', by_alias=True)
+        # Konversi/cek ID utama
+        if 'id' not in item_data or not isinstance(item_data['id'], str):
+             _id = item_data.get('_id') or getattr(item_doc,'id', None)
+             if _id: item_data['id'] = str(_id)
+             else: raise ValueError("Missing Item ID")
+        # Konversi/cek ID & field wajib nested Category
+        if 'category' in item_data and isinstance(item_data['category'], dict):
+            cat_data = item_data['category']
+            if 'id' not in cat_data or not isinstance(cat_data['id'], str):
+                 cat_link = getattr(item_doc, 'category', None)
+                 if isinstance(cat_link, Link) and cat_link.id: cat_data['id'] = str(cat_link.id)
+                 else: raise ValueError("Missing nested category 'id'")
+            if 'name' not in cat_data or not cat_data['name']: raise ValueError("Missing nested category 'name'")
+            if 'category_code' not in cat_data: raise ValueError("Missing nested category 'category_code'") # Asumsi wajib ada
+        elif 'category' not in item_data: raise ValueError("Missing required field 'category'")
+        # Validasi Pydantic
+        return Item.Response.model_validate(item_data)
+    except Exception as e:
+         logger.error(f"Error validating item response for {item_id_log}: {e}", exc_info=True)
+         raise HTTPException(status_code=500, detail=f"Error preparing item response: {e}") from e
+
 
 
 # --- GET /items/ --- (List Items - LENGKAPI PARAMETER & DECORATOR)

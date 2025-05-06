@@ -1,7 +1,8 @@
 # app/api/v1/endpoints/auth.py
 from datetime import timedelta
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Request
 from fastapi.security import OAuth2PasswordRequestForm
+from loguru import logger
 
 # Core imports should still work
 from app.core.security import (
@@ -11,9 +12,10 @@ from app.core.security import (
     get_password_hash,
 )
 from app.core.config import ACCESS_TOKEN_EXPIRE_MINUTES
+from app.core.rate_limiter import limiter
 
 # Model imports should still work
-from app.models.token import Token
+from app.dto.token import Token
 from app.models.user import User, UserRole # Import UserRole
 
 # Router setup for authentication endpoints
@@ -24,9 +26,11 @@ router = APIRouter(
 
 # --- Endpoint /token ---
 # Path will become /api/v1/auth/token
-@router.post("/token", response_model=Token)
-async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends()):
+@router.post("/login", response_model=Token)
+@limiter.limit("10/minute")
+async def login_for_access_token(request: Request, form_data: OAuth2PasswordRequestForm = Depends()):
     # ... (logika login sama seperti sebelumnya) ...
+    logger.info(f"Login attempt for user: {form_data.username}")
     user = await User.find_one(User.username == form_data.username)
     if not user or not verify_password(form_data.password, user.hashed_password):
         raise HTTPException(
@@ -48,8 +52,10 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
 # --- Endpoint /register ---
 # Path will become /api/v1/auth/register
 @router.post("/register", response_model=User.Response, status_code=status.HTTP_201_CREATED)
-async def register_user(user_in: User.Create):
+@limiter.limit("20/hour")
+async def register_user(request: Request, user_in: User.Create):
     # ... (logika registrasi sama seperti sebelumnya) ...
+    logger.info(f"Registration attempt for username: {user_in.username}")
     existing_user = await User.find_one(User.username == user_in.username)
     if existing_user:
         raise HTTPException(
@@ -85,7 +91,7 @@ async def register_user(user_in: User.Create):
 # --- Endpoint /users/me ---
 # Path will become /api/v1/auth/users/me (or maybe move it to users.py?)
 # Let's keep it here for now as it's closely tied to the logged-in user's token
-@router.get("/users/me") # Tanpa response_model
+@router.get("/users/me", response_model=User.Response) # Tanpa response_model
 async def read_users_me(current_user: User = Depends(get_current_active_user)):
     print(f"--- Debug: Current User Object ---")
     print(current_user)
