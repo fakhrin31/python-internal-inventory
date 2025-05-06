@@ -1,18 +1,15 @@
-# Gunakan image Python ringan
 FROM python:3.10-slim
 
-# Atur direktori kerja
 WORKDIR /app
 
-# Tambahkan PYTHONPATH agar folder /app dikenali sebagai package root
-ENV PYTHONPATH=/app
-
-# Install requirements
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Salin semua file project
-COPY app/ /app
+# Salin folder app ke dalam /app/app agar struktur tetap
+COPY app /app/app
 
-# Jalankan uvicorn
+# Set PYTHONPATH ke /app
+ENV PYTHONPATH=/app
+
+# Jalankan aplikasi
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
