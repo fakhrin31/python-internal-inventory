@@ -15,4 +15,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 ENV NAME World
 
 # Run app.py when the container launches
-CMD ["python", "app/app/main.py"]
+CMD ["python", "main.py"]
