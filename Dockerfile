@@ -5,13 +5,12 @@ FROM python:3.10-slim
 WORKDIR /app
 
 # Copy the current directory contents into the container at /app
-COPY . /app
-# Ensure the main.py file is copied correctly
-COPY app/main.py main.py
+COPY requirements.txt ./
 
 # Install any needed packages specified in requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
+COPY app/ .
 
 # Define environment variable
 ENV NAME World
