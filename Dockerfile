@@ -7,7 +7,7 @@ WORKDIR /app
 # Copy the current directory contents into the container at /app
 COPY . /app
 # Ensure the main.py file is copied correctly
-COPY app/main.py /app/main.py
+COPY app/main.py main.py
 
 # Install any needed packages specified in requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
@@ -17,4 +17,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 ENV NAME World
 
 # Run app.py when the container launches
-CMD ["python", "app/main.py"]
+CMD ["python", "main.py"]
