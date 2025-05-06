@@ -11,6 +11,7 @@ COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app/ .
+COPY app/main.py main.py
 
 # Define environment variable
 ENV NAME World
