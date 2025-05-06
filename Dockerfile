@@ -1,15 +1,18 @@
-# Gunakan image Python yang ringan
+# Gunakan image Python ringan
 FROM python:3.10-slim
 
-# Atur direktori kerja di dalam container
+# Atur direktori kerja
 WORKDIR /app
 
-# Salin file requirements.txt dan install dependencies
+# Tambahkan PYTHONPATH agar folder /app dikenali sebagai package root
+ENV PYTHONPATH=/app
+
+# Install requirements
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Salin semua file dari folder app ke dalam container
-COPY app/main.py main.py
+# Salin semua file project
+COPY app/ /app
 
-# Jalankan aplikasi menggunakan uvicorn
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Jalankan uvicorn
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
