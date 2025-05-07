@@ -1,13 +1,13 @@
 # app/api/v1/endpoints/items.py
 from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException, status, Path, Body, Query
+from fastapi import APIRouter, Depends, HTTPException, status, Path, Body, Query, Request
 from bson import ObjectId
-import logging
+from loguru import logger
 from datetime import datetime, timezone
 import uuid
 from pydantic import ValidationError, BaseModel # <-- Tambahkan BaseModel
 from beanie import Link
-from pymongo import ReadPreference
+
 
 # Import security dependency
 from app.core.security import require_staff_or_admin, User # (Asumsi get_current_active_user ada jika perlu auth umum)
@@ -15,43 +15,30 @@ from app.core.security import require_staff_or_admin, User # (Asumsi get_current
 # Import models and schemas
 from app.models.item import Item # Item sudah termasuk skema nested-nya
 from app.models.category import Category
-from app.models.borrowing import Borrowing, BorrowingStatus # <-- Tambahkan import Borrowing
+from app.models.borrowing import Borrowing, BorrowingStatus 
 
 # Helper dari categories endpoint
 from app.api.v1.endpoints.categories import get_category_or_404
 from app.core.utils import get_next_sequence_value
 
-logger = logging.getLogger(__name__)
+# Import Rate Limiter
+from app.core.rate_limiter import limiter
 
 router = APIRouter(
-    tags=["Items"]
+    tags=["Items"],
+    dependencies=[Depends(require_staff_or_admin)]
 )
 
 async def get_item_or_404(item_id: str) -> Item:
-    """
-    Retrieves an ACTIVE item by its string ObjectId.
-    Raises 404 if not found, invalid format, or if item is inactive.
-    """
-    if not ObjectId.is_valid(item_id):
-        logger.warning(f"Invalid ObjectId format for item: {item_id}")
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid item ID format.")
+    if not ObjectId.is_valid(item_id): raise HTTPException(status_code=400, detail="Invalid item ID format.")
     try:
-        # Cari berdasarkan ID dan pastikan aktif
         item = await Item.find_one({"_id": ObjectId(item_id), "is_active": True}, fetch_links=True)
-    except Exception as e:
-        logger.error(f"Error finding item by ID '{item_id}': {e}")
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Error retrieving item '{item_id}'.") from e
-
-    if not item: # find_one mengembalikan None jika tidak ditemukan ATAU tidak aktif
-        logger.info(f"Active item lookup failed for ID '{item_id}'.")
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Active item with ID '{item_id}' not found."
-        )
+    except Exception as e: raise HTTPException(status_code=500, detail=f"DB error finding item '{item_id}'.") from e
+    if not item: raise HTTPException(status_code=404, detail=f"Active item with ID '{item_id}' not found")
     return item
+
 # -----------------------------------------------------------------------
 
-# --- Fungsi Helper untuk Konversi dan Validasi Item Response (Tetap sama) ---
 def validate_item_response(item_doc: Item) -> Item.Response:
     """Konversi manual ObjectId dan validasi ke Item.Response."""
     # ... (kode helper validate_item_response dari contoh sebelumnya) ...
@@ -85,9 +72,10 @@ def validate_item_response(item_doc: Item) -> Item.Response:
     "/",
     response_model=Item.Response,
     status_code=status.HTTP_201_CREATED,
-    dependencies=[Depends(require_staff_or_admin)]
 )
+@limiter.limit("30/hour")
 async def create_item(
+    request: Request,
     item_in: Item.Create = Body(...),
     current_user: User = Depends(require_staff_or_admin)
 ):
@@ -114,6 +102,7 @@ async def create_item(
             break
     if not generated_sku:
         raise HTTPException(status_code=500, detail="Failed to generate unique SKU.")
+    logger.info(f"Generated SKU: {generated_sku}")
     # --- End SKU Generation ---
 
     # 3. Create Item object - LENGKAPI
@@ -137,6 +126,8 @@ async def create_item(
         # TODO: Create Initial Stock Transaction Record
     except Exception as e:
         # ... (error handling insert) ...
+        if "duplicate key error" in str(e).lower() and "sku" in str(e).lower():
+             raise HTTPException(status_code=409, detail=f"SKU conflict during save.") from e
         raise HTTPException(status_code=500, detail="Failed to save item.") from e
 
     # 5. Fetch after insert
@@ -154,9 +145,10 @@ async def create_item(
 @router.get(
     "/{item_id}",
     response_model=Item.Response,
-    dependencies=[Depends(require_staff_or_admin)] # <-- Tambahkan dependensi keamanan
 )
+@limiter.limit("120/minute")
 async def read_item(
+    request: Request,
     item_id: str = Path(..., description="The ID of the item to retrieve") # <-- Path parameter sudah benar
 ):
     """Retrieve details for a specific active item by ID."""
@@ -168,9 +160,9 @@ async def read_item(
 @router.put(
     "/{item_id}",
     response_model=Item.Response,
-    dependencies=[Depends(require_staff_or_admin)]
 )
 async def update_item(
+    request: Request,
     item_id: str = Path(..., description="The ID of the item to update"),
     item_in: Item.Update = Body(...), # Skema Update TIDAK punya SKU/stock
     current_user: User = Depends(require_staff_or_admin)
@@ -179,6 +171,7 @@ async def update_item(
     Update item details (name, desc, category, price, location, is_active).
     Stock level is NOT updated here. Category updated via ID.
     """
+    logger.info(f"User '{current_user.username}' attempting to update item: {item_id}")
     item_to_update = await get_item_or_404(item_id)
     update_data = item_in.model_dump(exclude_unset=True)
 
@@ -241,44 +234,14 @@ async def update_item(
         logger.error(f"Error preparing response for updated item {item_id}", exc_info=True)
         raise HTTPException(status_code=500, detail="Error preparing item data for response.") from e
 
-# --- Helper validate_item_response (Contoh) ---
-# (Harus dibuat mirip validate_borrowing_response, handle ID item & nested category ID)
-def validate_item_response(item_doc: Item) -> Item.Response:
-    if not item_doc: raise ValueError("Invalid item document")
-    item_id_log = str(getattr(item_doc, 'id', 'N/A'))
-    logger.debug(f"[{item_id_log}] Validating item response...")
-    try:
-        item_data = item_doc.model_dump(mode='json', by_alias=True)
-        # Konversi/cek ID utama
-        if 'id' not in item_data or not isinstance(item_data['id'], str):
-             _id = item_data.get('_id') or getattr(item_doc,'id', None)
-             if _id: item_data['id'] = str(_id)
-             else: raise ValueError("Missing Item ID")
-        # Konversi/cek ID & field wajib nested Category
-        if 'category' in item_data and isinstance(item_data['category'], dict):
-            cat_data = item_data['category']
-            if 'id' not in cat_data or not isinstance(cat_data['id'], str):
-                 cat_link = getattr(item_doc, 'category', None)
-                 if isinstance(cat_link, Link) and cat_link.id: cat_data['id'] = str(cat_link.id)
-                 else: raise ValueError("Missing nested category 'id'")
-            if 'name' not in cat_data or not cat_data['name']: raise ValueError("Missing nested category 'name'")
-            if 'category_code' not in cat_data: raise ValueError("Missing nested category 'category_code'") # Asumsi wajib ada
-        elif 'category' not in item_data: raise ValueError("Missing required field 'category'")
-        # Validasi Pydantic
-        return Item.Response.model_validate(item_data)
-    except Exception as e:
-         logger.error(f"Error validating item response for {item_id_log}: {e}", exc_info=True)
-         raise HTTPException(status_code=500, detail=f"Error preparing item response: {e}") from e
-
-
-
 # --- GET /items/ --- (List Items - LENGKAPI PARAMETER & DECORATOR)
 @router.get(
     "/",
     response_model=List[Item.Response],
-    dependencies=[Depends(require_staff_or_admin)] # <-- Tambahkan dependensi keamanan
 )
+@limiter.limit("100/minute")
 async def read_items(
+    request: Request,
     # Parameter Query untuk pagination dan filtering
     skip: int = 0,
     limit: int = 100,
@@ -335,7 +298,9 @@ async def read_items(
     status_code=status.HTTP_204_NO_CONTENT, # Tetap 204 karena aksi berhasil
     dependencies=[Depends(require_staff_or_admin)]
 )
+@limiter.limit("10/hour")
 async def delete_item(
+    request: Request,
     item_id: str = Path(..., description="The ID of the item to mark as inactive"),
     current_user: User = Depends(require_staff_or_admin)
 ):

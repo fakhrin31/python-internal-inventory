@@ -1,8 +1,8 @@
 # app/api/v1/endpoints/borrowings.py
 from typing import List, Optional, Tuple # Import Tuple
-from fastapi import APIRouter, Depends, HTTPException, status, Path, Body, Query
+from fastapi import APIRouter, Depends, HTTPException, status, Path, Body, Query, Request
 from bson import ObjectId
-import logging
+from loguru import logger
 from datetime import datetime, timezone
 from pymongo import DESCENDING, ReadPreference, ReturnDocument # Import ReadPreference, ReturnDocument
 from bson.dbref import DBRef
@@ -23,13 +23,14 @@ from beanie import Link
 from app.core.availability import check_item_availability
 from app.api.v1.endpoints.items import get_item_or_404
 
+# Import Rate Limiter
+from app.core.rate_limiter import limiter
+
 # Import Motor Client untuk akses langsung jika diperlukan
 import motor.motor_asyncio
 
-logger = logging.getLogger(__name__)
-
 router = APIRouter(
-    # prefix="/borrowings",
+    prefix="/borrowings",
     tags=["Borrowings & Bookings"]
 )
 
@@ -166,10 +167,14 @@ async def get_returnable_booking_or_404(borrowing_id_str: str, session=None) -> 
     status_code=status.HTTP_201_CREATED,
     dependencies=[Depends(require_role(UserRole.USER))]
 )
+@limiter.limit("10/hour")
 async def schedule_borrowing(
+    request: Request,
     booking_request: Borrowing.CreateBooking = Body(...),
     current_user: User = Depends(require_role(UserRole.USER))
 ):
+    """Allows a user to submit a booking request for a future period (status: PENDING_APPROVAL)."""
+    logger.info(f"User '{current_user.username}' submitting booking for item '{booking_request.item_id}'.")
     start_date = booking_request.start_date
     end_date = booking_request.end_date
     now_utc = datetime.now(timezone.utc)
@@ -225,8 +230,19 @@ async def schedule_borrowing(
 
 
 # --- Endpoint PATCH /approve (lengkap) ---
-@router.patch("/{borrowing_id}/approve", status_code=status.HTTP_200_OK, dependencies=[Depends(require_staff_or_admin)])
-async def approve_booking(borrowing_id: str = Path(...), current_user: User = Depends(require_staff_or_admin)):
+@router.patch(
+    "/{borrowing_id}/approve", 
+    status_code=status.HTTP_200_OK,
+    dependencies=[Depends(require_staff_or_admin)]
+)
+@limiter.limit("60/minute")
+async def approve_booking(
+    request: Request, 
+    borrowing_id: str = Path(...), 
+    current_user: User = Depends(require_staff_or_admin)
+):
+    """Approves a PENDING_APPROVAL booking, changing status to SCHEDULED."""
+    logger.info(f"Admin/Staff '{current_user.username}' approving booking '{borrowing_id}'.")
     booking_to_approve = await get_pending_booking_or_404(borrowing_id)
     update_data = {"status": BorrowingStatus.SCHEDULED, "updated_at": datetime.now(timezone.utc)}
     try: await booking_to_approve.update({"$set": update_data})
@@ -235,8 +251,19 @@ async def approve_booking(borrowing_id: str = Path(...), current_user: User = De
 
 
 # --- Endpoint PATCH /reject (lengkap) ---
-@router.patch("/{borrowing_id}/reject", status_code=status.HTTP_200_OK, dependencies=[Depends(require_staff_or_admin)])
-async def reject_booking(borrowing_id: str = Path(...), current_user: User = Depends(require_staff_or_admin)):
+@router.patch(
+    "/{borrowing_id}/reject", 
+    status_code=status.HTTP_200_OK, 
+    dependencies=[Depends(require_staff_or_admin)]
+)
+@limiter.limit("60/minute")
+async def reject_booking(
+    request: Request,
+    borrowing_id: str = Path(...), 
+    current_user: User = Depends(require_staff_or_admin)
+):
+    """Rejects a PENDING_APPROVAL booking, changing status to REJECTED."""
+    logger.info(f"Admin/Staff '{current_user.username}' rejecting booking '{borrowing_id}'.")
     booking_to_reject = await get_pending_booking_or_404(borrowing_id)
     update_data = {"status": BorrowingStatus.REJECTED, "updated_at": datetime.now(timezone.utc)}
     try: await booking_to_reject.update({"$set": update_data})
@@ -245,8 +272,13 @@ async def reject_booking(borrowing_id: str = Path(...), current_user: User = Dep
 
 
 # --- Endpoint GET / (lengkap) ---
-@router.get("/", response_model=List[Borrowing.Response])
+@router.get(
+    "/", 
+    response_model=List[Borrowing.Response]
+)
+@limiter.limit("120/minute")
 async def read_borrowings(
+    request: Request,
     skip: int = 0, limit: int = 25, status: Optional[List[BorrowingStatus]] = Query(None),
     item_id: Optional[str] = Query(None), user_id: Optional[str] = Query(None),
     current_user: User = Depends(get_current_active_user)
@@ -432,22 +464,21 @@ async def process_item_return(
 # --- Endpoint GET /{borrowing_id} (LENGKAP) ---
 @router.get(
     "/{borrowing_id}",
-    response_model=Borrowing.Response
+    response_model=Borrowing.Response, # <-- Mengembalikan detail
+    summary="Get Borrowing/Booking Details"
+    # Dependensi keamanan (get_current_active_user & cek role/ownership) ada di dalam
 )
+@limiter.limit("120/minute")
 async def read_borrowing(
+    request: Request, # Untuk limiter
     borrowing_id: str = Path(...),
     current_user: User = Depends(get_current_active_user)
 ):
-    """Retrieve details of a specific borrowing record."""
-    if not ObjectId.is_valid(borrowing_id): raise HTTPException(status_code=400, detail="Invalid borrowing ID format.")
-
-    # Fetch DENGAN links untuk response detail
+    """Retrieve details of a specific borrowing. Users can only see their own unless Admin/Staff."""
+    if not ObjectId.is_valid(borrowing_id): raise HTTPException(status_code=400, detail="Invalid ID format.")
     borrowing = await Borrowing.find_one({"_id": ObjectId(borrowing_id)}, fetch_links=True)
-    if not borrowing: raise HTTPException(status_code=404, detail="Borrowing record not found.")
-
-    # Otorisasi
+    if not borrowing: raise HTTPException(status_code=404, detail="Record not found.")
+    # --- (Logika otorisasi: user lihat miliknya, admin/staff lihat semua - sama) ---
     if current_user.role == UserRole.USER and borrowing.borrower.id != current_user.id:
-         raise HTTPException(status_code=403, detail="Forbidden: Cannot view other user's borrowings.")
-
-    # Gunakan helper validasi response
+         raise HTTPException(status_code=403, detail="Forbidden to view this record.")
     return validate_borrowing_response(borrowing)

@@ -2,7 +2,7 @@
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from bson import ObjectId
-import logging
+from loguru import logger
 from datetime import datetime, timezone, time # Import time
 
 # Import security dependencies
@@ -22,8 +22,6 @@ from app.api.v1.endpoints.borrowings import validate_borrowing_response
 
 # Import DESCENDING jika belum
 from pymongo import DESCENDING, ASCENDING
-
-logger = logging.getLogger(__name__)
 
 router = APIRouter(
     prefix="/reports",
