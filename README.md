@@ -168,8 +168,6 @@ cd inventory-app
 6.  **(Optional) Create Initial Admin User:**
     *   If you have a script like `create_admin.py` or `manage.py create-admin`, run it to create the first admin user to log in and use admin-only endpoints.
 
-From the project root directory (with the virtual environment activated):
-
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE.md](LICENSE.md) file for details.
